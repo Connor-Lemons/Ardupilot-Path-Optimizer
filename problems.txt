@@ -1,0 +1,11 @@
+- Currently assume that all sufficiently large turns are just straight lines, but plotted trajectory does not follow that logic.
+
+- Implement dynamic phase assignment to handle complex/simple constraints, and potentially analyze solution metrics and rerun with more phases if errors are detected (dynamic phase determination with upper bound on time/phase number).
+
+- Add a "path" constraint where the user can specify all the parameters between two points and it seamlessly is integrated
+
+- Add ability for extended constraints to also constraint following phase
+
+- Add ability for extended constraints to be able to control time duration of phase
+
+- Add solution checker (hamiltonian and potentially runtime)
