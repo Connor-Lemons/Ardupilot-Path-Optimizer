@@ -185,6 +185,24 @@ class Trajectory:
         if idx == 0:
             raise ValueError("Cannot insert constraint before start.")
         self.constraints.insert(idx-1, constraint)
+
+    def sub_constraint(self):
+        '''
+        Removes a constraint from the end of the trajectory.
+        '''
+        if len(self.constraints) == 1:
+            raise ValueError("Must have at least one constraint to define the trajectory.")
+        self.constraints.pop()
+
+    def remove_constraint(self, idx=1):
+        '''
+        Removes a constraint from the specified index of the trajectory. Indexing includes the start constraint, so setting idx to 1 will remove the constraint just after the start constraint.
+        '''
+        if idx == 0:
+            raise ValueError("Cannot remove start constraint.")
+        if len(self.constraints) == 1:
+            raise ValueError("Must have at least one constraint to define the trajectory.")
+        self.constraints.pop(idx-1)
         
     def trajectory(self):
         '''
@@ -336,14 +354,14 @@ class Optimizer:
     def __post_init__(self):
         for constraint in self.traj.constraints:
             if isinstance(constraint, ExtendedConstraint):
-                if constraint.radius is not None and (np.abs(constraint.radius) < self.ap.min_turn or np.abs(constraint.radius) > self.ap.max_turn):
+                if constraint.radius_tol is not None and (np.abs(constraint.radius) < self.ap.min_turn or np.abs(constraint.radius) > self.ap.max_turn):
                     warnings.warn(f"Radius constraint |{constraint.radius}| [m] is out of given Ardupilot bounds [{self.ap.min_turn}, {self.ap.max_turn}]. "
                                   "This is likely to cause errors with the optimizer.", ConstraintWarning)
-                if constraint.speed is not None and (constraint.speed < self.ap.V_min or constraint.speed > self.ap.V_max):
+                if constraint.speed_tol is not None and (constraint.speed < self.ap.V_min or constraint.speed > self.ap.V_max):
                     warnings.warn(f"Speed constraint {constraint.speed} [m/s] is out of given Ardupilot bounds [{self.ap.V_min}, {self.ap.V_max}]. "
                                   "This is likely to cause errors with the optimizer.", ConstraintWarning)
-                if constraint.climb is not None and (constraint.climb < -self.ap.max_desc or constraint.climb > self.ap.max_climb):
-                    warnings.warn(f"Climb constraint {constraint.climb} [m/s] is out of given Ardupilot bounds [-{self.ap.max_desc}, {self.ap.max_climb}]. "
+                if constraint.climb_tol is not None and (constraint.climb < -self.ap.max_desc or constraint.climb > self.ap.max_climb):
+                    warnings.warn(f"Climb constraint {constraint.climb} [m/s] is out of given Ardupilot bounds [{-self.ap.max_desc}, {self.ap.max_climb}]. "
                                   "This is likely to cause errors with the optimizer.", ConstraintWarning)
 
     def setup(self):
@@ -354,20 +372,25 @@ class Optimizer:
         ap = self.ap
         optim_params = self.optim_params
 
+        # Extract the weights to form the cost function to minimize.
         W_t, W_r, W_v, W_c = optim_params.get_weights()
 
+        # Helpful reference numbers for cleaner indexing later
         num_constr = len(traj.constraints)
         tot_phase = num_constr*traj.phases_per_constraint
         last_phase_idx = tot_phase-1
 
+        # Creates the YAPSS problem, nx defines the number of states (and phases via its structure), ns defines the number of parameters (global to the problem), and nd defines the number of discrete constraints necessary.
         problem = yapss.Problem(name = "Constraints to Trajectory",
                                 nx = [4]*tot_phase,
                                 ns = 3*tot_phase,
                                 nd = 5*(tot_phase-1))
         
+        # Define the objective function.
         def objective(arg):
             param = arg.parameter
             objective = W_t*arg.phase[last_phase_idx].final_time**2
+            # Add the parameters (controls) for each phase iteratively to the objective function.
             for p in range(tot_phase):
                 objective += (
                 W_r*param[3*p]**2 +
@@ -376,8 +399,10 @@ class Optimizer:
                 )
             arg.objective = objective
 
+        # Define the continuous function (system dynamics and controls).
         def continuous(arg):
             params = arg.parameter
+            # Define the system dynamics for each phase.
             for p in range(tot_phase):
                 x, y, z, phi = arg.phase[p].state
                 r_inv, V, omega = params[3*p:3*p+3]
@@ -387,17 +412,21 @@ class Optimizer:
                 phidot = V*r_inv
                 arg.phase[p].dynamics = [xdot, ydot, zdot, phidot]
 
+        # Define the discrete function (discrete constraints).
         def discrete(arg):
             discrete = []
+            # Make sure state and time of previous phase match state and time of next phase.
             for p in range(last_phase_idx):
                 discrete.append(arg.phase[p].final_time - arg.phase[p+1].initial_time)
                 discrete.extend(arg.phase[p].final_state - arg.phase[p+1].initial_state)
             arg.discrete = discrete
 
+        # Pass the defined functions to YAPSS.
         problem.functions.objective = objective
         problem.functions.continuous = continuous
         problem.functions.discrete = discrete
 
+        # Preliminarily bound the controls for each phase based on Ardupilot limits. ExtendedConstraints can override these later.
         for p in range(tot_phase):
             problem.bounds.phase[p].initial_time.lower = 0
             problem.bounds.parameter.lower[3*p] = -1/ap.min_turn
@@ -407,41 +436,55 @@ class Optimizer:
             problem.bounds.parameter.lower[3*p+2] = -ap.max_desc
             problem.bounds.parameter.upper[3*p+2] = ap.max_climb
             problem.guess.phase[p].time = [0, 1]
+
+        # Make sure that all discrete constraints are strictly enforced.
         problem.bounds.discrete.lower[:] = problem.bounds.discrete.upper[:] = 0
 
+        # Define initial conditions based on StartConstraint of Trajectory.
         problem.bounds.phase[0].initial_time.upper = 0
         problem.bounds.phase[0].initial_state.lower = problem.bounds.phase[0].initial_state.upper = traj.start.state()
+
+        # Iteratively enforce constraints at correct phases to maintain phases_per_constraint.
         for i in range(num_constr):
             current_phase_idx = (i+1)*traj.phases_per_constraint-1
             current_phase = problem.bounds.phase[current_phase_idx]
             current_constraint = traj.constraints[i]
             current_phase.final_state.lower[0:3] = current_constraint.state(False) - np.array([current_constraint.tolerance]*3)
             current_phase.final_state.upper[0:3] = current_constraint.state(False) + np.array([current_constraint.tolerance]*3)
+            # Enforce bearing if Constraint is directional.
             if current_constraint.directional:
                 current_phase.final_state.lower[3] = current_phase.final_state.upper[3] = current_constraint.phi
 
+            # Enforce ExtendedConstraint if applicable.
             if isinstance(current_constraint, ExtendedConstraint):
+                # Turn radius constraint.
                 if current_constraint.radius_tol is not None:
                     radius_bounds = [1/(current_constraint.radius - current_constraint.radius_tol), 1/(current_constraint.radius + current_constraint.radius_tol)]
                     problem.bounds.parameter.lower[3*current_phase_idx] = min(radius_bounds)
                     problem.bounds.parameter.upper[3*current_phase_idx] = max(radius_bounds)
+                # Speed constraint.
                 if current_constraint.speed_tol is not None:
                     problem.bounds.parameter.lower[3*current_phase_idx+1] = current_constraint.speed - current_constraint.speed_tol
                     problem.bounds.parameter.upper[3*current_phase_idx+1] = current_constraint.speed + current_constraint.speed_tol
+                # Climb constraint.
                 if current_constraint.climb_tol is not None:
                     climb_bounds = [current_constraint.climb - current_constraint.climb_tol, current_constraint.climb + current_constraint.climb_tol]
                     problem.bounds.parameter.lower[3*current_phase_idx+2] = min(climb_bounds)
                     problem.bounds.parameter.upper[3*current_phase_idx+2] = max(climb_bounds)
+                # Phase duration constraint.
                 if current_constraint.duration is not None:
                     current_phase.duration.lower = current_phase.duration.upper = current_constraint.duration
 
+        # Set the problem mesh.
         problem.mesh.phase[0].collocation_points = optim_params.segments * [optim_params.points]
         problem.mesh.phase[0].fraction = optim_params.segments * [1 / optim_params.segments]
+        # Set the IPOPT tolerance.
         problem.ipopt_options.tol = optim_params.tol
-
+        # Suppress IPOPT outputs.
         problem.ipopt_options.print_user_options = "no"
         problem.ipopt_options.print_level = 0
 
+        # Create the problem
         self.problem = problem
         return self.problem
 
