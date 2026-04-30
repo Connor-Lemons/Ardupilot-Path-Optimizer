@@ -37,8 +37,8 @@ class Constraint:
 
 
     def __post_init__(self):
-        if self.tolerance < 1.0:
-            raise ValueError("tolerance must be >= 1.0")
+        if self.tolerance < 1.0 and not isinstance(self, StartConstraint):
+            raise ValueError("tolerance must be >= 1.0.")
 
     def state(self, full_size=True):
         '''
@@ -63,31 +63,29 @@ class StartConstraint(Constraint):
         phi_deg (float): Required bearing [deg]
 
     Properties:
-        directional (bool, optional, default=False): Whether to enforce the bearing
-        tolerance (float, optional, default=1.0): Required spatial tolerance, must be >= 1.0 [m]
+        directional (bool, default=True): Whether to enforce the bearing, must be True
+        tolerance (float, default=0.0): Required spatial tolerance, must be 0 [m]
         phi(float): Bearing in radians [rad]
     '''
-    phi_deg: float = field()
-    directional: bool = field(default=True, init=False)
-    tolerance: float = field(default=0.0, init=False)
-
     def __init__(self, x: float, y: float, z: float, phi_deg: float, **kwargs):
         if "directional" in kwargs:
             raise ValueError(
-                "Cannot set 'directional' for StartConstraint; defaults to true."
+                "Cannot set 'directional' for StartConstraint; defaults to True."
             )
         if "tolerance" in kwargs:
             raise ValueError(
                 "Cannot set 'tolerance' for StartConstraint: defaults to 0.0."
             )
-        super().__init__(x=x, y=y, z=z, phi_deg=phi_deg, directional=True, **kwargs)
+        super().__init__(x=x, y=y, z=z, phi_deg=phi_deg, directional=True, tolerance=0.0, **kwargs)
 
 @dataclass
 class ExtendedConstraint(Constraint):
     '''
     Defines a more advanced constraint which optionally includes speed and bank angle constraints.
 
-    An extended constraint has all the attributes of a normal constraint, but allows for constraing the speed and/or bank angle of the aircraft when entering the constraint. Note that the use of extended constraints will likely require more phases per constraint to handle.
+    An extended constraint has all the attributes of a normal constraint, but allows for constraining the speed and/or bank angle of the aircraft when entering the constraint. Note that the use of extended constraints will likely require more phases per constraint to handle.
+
+    The corresponding tolerance must be defined for the given constraint, otherwise it won't be active.
 
     Attributes:
         x (float): X position of constraint [m]
@@ -96,13 +94,13 @@ class ExtendedConstraint(Constraint):
         phi_deg (float, optional, default=0.0): Required bearing [deg]
         directional (bool, optional, default=False): Whether to enforce the bearing
         tolerance (float, optional, default=1.0): Required spatial tolerance, must be >= 1.0 [m]
-        radius (float, optional, default=0.0): Required turn radius, negative for CCW, positive for CW [m]
+        radius (float, optional, default=None): Required turn radius, negative for CCW, positive for CW [m]
         radius_tol (float, optional, default=None): Tolerance on radius constraint, set to None to disable [m]
-        speed (float, optional, default=0.0): Required speed [m/s]
+        speed (float, optional, default=None): Required speed [m/s]
         speed_tol (float, optional, default=None): Tolerance on speed constraint, set to None to disable [m/s]
-        climb (float, optional, default=0.0): Required climb rate [m/s]
+        climb (float, optional, default=None): Required climb rate [m/s]
         climb_tol (float, optional, default=-None): Tolerance on climb constraint, set to None to disable [m/s]
-        duration (float, optional, default=0): Duration before spatial point that the constraints will be met [s]
+        duration (float, optional, default=None): Duration before spatial point that the constraints will be met [s]
 
     Properties:
         phi(float): Bearing in radians [rad]
@@ -113,15 +111,31 @@ class ExtendedConstraint(Constraint):
     speed_tol: Optional[float] = None
     climb: Optional[float] = None
     climb_tol: Optional[float] = None
-    duration: Optional[float] = 0
+    duration: Optional[float] = None
 
     def __post_init__(self):
-        if self.speed_tol is not None and self.speed_tol < 0:
-            raise ValueError("speed_tol must be nonnegative")
-        if self.duration < 0:
-            raise ValueError("duration must be nonnegative")
-        if self.duration == 0:
-            warnings.warn(f"Current duration of {self.duration} [s] may lead to optional parameters being ignored by the optimizer. Consider increasing the duration.", ConstraintWarning)
+        if self.radius_tol is not None:
+            if self.radius is None:
+                raise ConstraintError("radius_tol is set, but radius is not.")
+            if self.radius_tol < 0:
+                raise ValueError("radius_tol must be nonnegative.")
+        if self.speed_tol is not None:
+            if self.speed is None:
+                raise ConstraintError("speed_tol is set, but speed is not.")
+            if self.speed_tol < 0:
+                raise ValueError("speed_tol must be nonnegative.")
+        if self.climb_tol is not None:
+            if self.climb is None:
+                raise ConstraintError("climb_tol is set, but climb is not.")
+            if self.climb_tol < 0:
+                raise ValueError("climb_tol must be nonnegative.")
+        if self.speed is not None and self.speed < 0:
+            raise ValueError("speed must be nonnegative.")
+        if self.duration is not None:
+            if self.duration < 0:
+                raise ValueError("duration must be nonnegative.")
+            if self.duration == 0:
+                warnings.warn(f"Current duration of {self.duration} [s] may lead to optional parameters being ignored by the optimizer. Consider increasing the duration.", ConstraintWarning)
         return super().__post_init__()
 
 @dataclass
@@ -142,11 +156,14 @@ class Trajectory:
 
     def __post_init__(self):
         if not isinstance(self.start, StartConstraint):
-            raise TypeError("First Constraint must be a StartConstraint")
+            raise TypeError("First Constraint must be a StartConstraint.")
         if not isinstance(self.constraints, list):
-            raise TypeError("Trajectory must be a list of Constraint objects")
+            raise TypeError("Trajectory must be a list of Constraint objects.")
         if len(self.constraints) == 0:
-            raise ValueError("Trajectory must contain at least one constraint other than the StartConstraint")
+            raise ValueError("Trajectory must contain at least one constraint other than the StartConstraint.")
+        for constraint in self.constraints:
+            if isinstance(constraint, StartConstraint):
+                raise TypeError("StartConstraints are not permitted in the constraint list.")
         
     def __len__(self):
         return len(self.constraints) + 1
@@ -159,7 +176,7 @@ class Trajectory:
             raise TypeError("Can only add Constraint objects, not StartConstraint objects")
         self.constraints.append(constraint)
 
-    def insert_constraint(self, idx, constraint:Constraint):
+    def insert_constraint(self, constraint:Constraint, idx=1):
         '''
         Adds a constraint to the specified index of the trajectory. Indexing includes the start constraint, so setting idx to 1 will put the constraint between the start constraint and the first normal constraint.
         '''
@@ -179,7 +196,7 @@ class Trajectory:
         '''
         Returns the full trajectory as a list of states (np arrays). If False is passed, only returns spatial coordinates of states.
         '''
-        return [self.start.state(full_size=full_size), *(constraint.state(full_size=full_size) for constraint in self.constraints)]
+        return np.array([self.start.state(full_size=full_size), *(constraint.state(full_size=full_size) for constraint in self.constraints)])
     
 @dataclass
 class ArdupilotParameters:
@@ -211,7 +228,6 @@ class ArdupilotParameters:
     roll_limit: Optional[float] = 65
     roll_min: Optional[float] = 5
 
-    9.80665
     @property
     def roll_min_rad(self):
         return np.deg2rad(self.roll_min)
@@ -236,7 +252,7 @@ class OptimizerParameters:
     Attributes:
         time_weight (float, optional, default=1.0): Weighting on final time
         turn_weight (float, optional, default=1.0): Weighting on turn radius
-        velocity_weight (float, optional, default=1.0): Weighting on velocity deviation from cruise
+        speed_weight (float, optional, default=1.0): Weighting on velocity deviation from cruise
         climb_weight (float, optional, default=1.0): Weighting on requested altitude change
         segments (int, optional, default=1): Number of segments in the mesh
         points (int, optional, default=1): Number of collocation points per segment in the mesh
@@ -244,7 +260,7 @@ class OptimizerParameters:
     '''
     time_weight: Optional[float] = 1
     turn_weight: Optional[float] = 1
-    velocity_weight: Optional[float] = 1
+    speed_weight: Optional[float] = 1
     climb_weight: Optional[float] = 1
     segments: Optional[int] = 10
     points: Optional[int] = 10
@@ -253,7 +269,7 @@ class OptimizerParameters:
     def get_weights(self):
         return np.array([self.time_weight,
                          self.turn_weight,
-                         self.velocity_weight,
+                         self.speed_weight,
                          self.climb_weight])
     
 @dataclass(frozen=True)
@@ -289,6 +305,12 @@ class TrajectorySolution:
 class ConstraintWarning(UserWarning):
     '''
     Creates a ConstraintWarning for easy user filtering.
+    '''
+    pass
+
+class ConstraintError(ValueError):
+    '''
+    Creates a ConstraintError for easy user filtering.
     '''
     pass
 
@@ -400,9 +422,9 @@ class Optimizer:
 
             if isinstance(current_constraint, ExtendedConstraint):
                 if current_constraint.radius_tol is not None:
-                    radius_bounds = [current_constraint.radius - current_constraint.radius_tol, current_constraint.radius + current_constraint.radius_tol]
-                    problem.bounds.parameter.lower[3*current_phase_idx] = 1/min(radius_bounds)
-                    problem.bounds.parameter.upper[3*current_phase_idx] = 1/max(radius_bounds)
+                    radius_bounds = [1/(current_constraint.radius - current_constraint.radius_tol), 1/(current_constraint.radius + current_constraint.radius_tol)]
+                    problem.bounds.parameter.lower[3*current_phase_idx] = min(radius_bounds)
+                    problem.bounds.parameter.upper[3*current_phase_idx] = max(radius_bounds)
                 if current_constraint.speed_tol is not None:
                     problem.bounds.parameter.lower[3*current_phase_idx+1] = current_constraint.speed - current_constraint.speed_tol
                     problem.bounds.parameter.upper[3*current_phase_idx+1] = current_constraint.speed + current_constraint.speed_tol
@@ -410,8 +432,8 @@ class Optimizer:
                     climb_bounds = [current_constraint.climb - current_constraint.climb_tol, current_constraint.climb + current_constraint.climb_tol]
                     problem.bounds.parameter.lower[3*current_phase_idx+2] = min(climb_bounds)
                     problem.bounds.parameter.upper[3*current_phase_idx+2] = max(climb_bounds)
-
-                current_phase.duration.lower = current_phase.duration.upper = current_constraint.duration
+                if current_constraint.duration is not None:
+                    current_phase.duration.lower = current_phase.duration.upper = current_constraint.duration
 
         problem.mesh.phase[0].collocation_points = optim_params.segments * [optim_params.points]
         problem.mesh.phase[0].fraction = optim_params.segments * [1 / optim_params.segments]
