@@ -492,8 +492,11 @@ class Optimizer:
         '''
         Solves the YAPSS problem and returns the YAPSS solution object. If the problem has not been setup, it will be computed before solving.
         '''
+        # Checks to see if setup() has been run and runs it if not.
         if self.problem is None:
             self.setup()
+
+        # Solve the problem
         self.solution = self.problem.solve()
         return self.solution
 
@@ -501,16 +504,20 @@ class Optimizer:
         '''
         Extracts the data from the YAPSS solution object and stitches the phase data together. The resulting Solution object is nicer to work with for most cases, though the Solution object intentionally omits some data from the YAPSS solution object (most notably, optimizer information and solution statistics).
         '''
+        # Checks to see if solve() has been run and runs it if not.
         if self.solution is None:
             self.solve()
+        # Simplify variables.
         sol = self.solution
         traj = self.traj
         ap = self.ap
 
+        # Define useful indices.
         num_constr = len(traj.constraints)
         tot_phase = num_constr*traj.phases_per_constraint
         last_phase_idx = tot_phase-1
 
+        # Initialize lists to contain the solution.
         t_sol = []
         t_phase_sol = []
         x_sol = []
@@ -523,11 +530,14 @@ class Optimizer:
         V_sol = []
         omega_sol = []
 
+        # Iterate throgh each phase and add the data to the matching solution array.
         for p in range(tot_phase):
+            # Store the time endpoints of the phase separately for later reference.
             t_temp = sol.phase[p].time
             t_phase_sol.append(t_temp[0])
             if p == last_phase_idx:
                 t_phase_sol.append(t_temp[-1])
+            # Stitch the state together.
             x_temp, y_temp, z_temp, phi_temp = sol.phase[p].state
             t_sol.extend(t_temp)
             x_sol.extend(x_temp)
@@ -535,19 +545,22 @@ class Optimizer:
             z_sol.extend(z_temp)
             phi_sol.extend(phi_temp)
             phi_deg_sol.extend(np.rad2deg(phi_temp))
+            # Stitch the controls together
             r_inv_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
-
+            # If the requested control radius is larger than the maximum allowed turn, treat it as a straight trajectory.
             if np.abs(r_inv_temp) < np.reciprocal(ap.max_turn):
                 r_inv_temp = 0
-            r_inv_sol.extend([r_inv_temp]*2)
+            r_inv_sol.extend([r_inv_temp])
+            # Generate the radius solution.
             if r_inv_temp == 0:
-                r_sol.extend([r_inv_temp]*2)
+                r_sol.extend([r_inv_temp])
             else:
-                r_sol.extend([np.reciprocal(r_inv_temp)]*2)
+                r_sol.extend([np.reciprocal(r_inv_temp)])
+            # Generate the speed and climb solutions.
+            V_sol.extend([V_temp])
+            omega_sol.extend([omega_temp])
 
-            V_sol.extend([V_temp]*2)
-            omega_sol.extend([omega_temp]*2)
-
+        # Extract the problem into a TrajectorySolution object.
         self.Sol = TrajectorySolution(t_sol, t_phase_sol, x_sol, y_sol, z_sol, phi_sol, phi_deg_sol, r_inv_sol, r_sol, V_sol, omega_sol)
         return self.Sol
 
@@ -555,6 +568,7 @@ class Optimizer:
         '''
         Generates relevant plots of the trajectory.
         '''
+        # Checks to see if extract() has been run and runs it if not.
         if self.Sol is None:
             self.extract()
         traj = self.traj
@@ -562,20 +576,24 @@ class Optimizer:
         sol = self.solution
         Sol = self.Sol
 
+        # Handy indices.
         num_constr = len(traj.constraints)
         tot_phase = num_constr*traj.phases_per_constraint
         last_phase_idx = tot_phase-1
 
+        # Initialize figure.
         fig = plt.figure(figsize=(20,16))
         fig.tight_layout()
 
+        # Plot the trajectory.
         ax1 = fig.add_subplot(2, 2, 1, projection='3d')
+        # Go phase by phase so that each phase gets its own color.
         for p in range(tot_phase):
             x_temp, y_temp, z_temp, phi_temp = sol.phase[p].state
             ax1.plot(x_temp, y_temp, z_temp)
-        ax1.scatter(*traj.start.state(False), color='green')
+        ax1.scatter(*traj.start.state(False), color='green', label='Start Constraint')
         for i in range(num_constr):
-            ax1.scatter(*traj.constraints[i].state(False), color='red')
+            ax1.scatter(*traj.constraints[i].state(False), color='red', label='Constraint')
         ax1.set_aspect('equal', adjustable='datalim')
         ax1.set_xlabel("x [m]")
         ax1.set_ylabel("y [m]")
@@ -583,6 +601,7 @@ class Optimizer:
         ax1.set_title("Trajectory")
         ax1.grid(True)
 
+        # Plot the turn radius.
         ax2 = fig.add_subplot(2, 2, 2)
         for p in range(tot_phase):
             t_temp = sol.phase[p].time
@@ -601,6 +620,7 @@ class Optimizer:
         ax2.set_title("Turn Radius Parameters")
         ax2.grid(True)
 
+        # Plot the speed.
         ax3 = fig.add_subplot(2, 2, 3)
         for p in range(tot_phase):
             t_temp = sol.phase[p].time
@@ -609,10 +629,11 @@ class Optimizer:
         ax3.set_xlim(Sol.t_sol[0], Sol.t_sol[-1])
         ax3.set_xticks(Sol.t_phase_sol)
         ax3.set_xlabel("Time [s]")
-        ax3.set_ylabel("Velocity [m/s]")
-        ax3.set_title("Velocity Parameters")
+        ax3.set_ylabel("Speed [m/s]")
+        ax3.set_title("Speed Parameters")
         ax3.grid(True)
 
+        # Plot the climb rate.
         ax4 = fig.add_subplot(2, 2, 4)
         for p in range(tot_phase):
             t_temp = sol.phase[p].time
@@ -627,5 +648,6 @@ class Optimizer:
 
         plt.close(fig)
 
+        # Return the figure.
         self.fig = fig
         return self.fig
