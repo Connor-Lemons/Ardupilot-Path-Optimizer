@@ -17,3 +17,7 @@
 - Have Optimizer automatically run __post_init__ when traj is edited
 
 - User will not be notified if things are set (radius, phi_deg, etc.) but tolerances/directional are not (effectively disabled)
+
+- Implement better guesses
+
+- Negative radius currently gives CW turns

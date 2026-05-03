@@ -384,7 +384,7 @@ class Optimizer:
         problem = yapss.Problem(name = "Constraints to Trajectory",
                                 nx = [4]*tot_phase,
                                 ns = 3*tot_phase,
-                                nd = 5*(tot_phase-1))
+                                nd = 5*(tot_phase-1)+tot_phase)
         
         # Define the objective function.
         def objective(arg):
@@ -419,6 +419,8 @@ class Optimizer:
             for p in range(last_phase_idx):
                 discrete.append(arg.phase[p].final_time - arg.phase[p+1].initial_time)
                 discrete.extend(arg.phase[p].final_state - arg.phase[p+1].initial_state)
+            for p in range(tot_phase):
+                discrete.append(arg.phase[p].final_time - arg.phase[p].initial_time)
             arg.discrete = discrete
 
         # Pass the defined functions to YAPSS.
@@ -429,16 +431,21 @@ class Optimizer:
         # Preliminarily bound the controls for each phase based on Ardupilot limits. ExtendedConstraints can override these later.
         for p in range(tot_phase):
             problem.bounds.phase[p].initial_time.lower = 0
+            problem.bounds.phase[p].final_time.lower = 0
+            problem.bounds.phase[p].duration.lower = 1e-8
             problem.bounds.parameter.lower[3*p] = -1/ap.min_turn
             problem.bounds.parameter.upper[3*p] = 1/ap.min_turn
             problem.bounds.parameter.lower[3*p+1] = ap.V_min
             problem.bounds.parameter.upper[3*p+1] = ap.V_max
+            problem.guess.parameter[3*p+1] = ap.V_cruise
             problem.bounds.parameter.lower[3*p+2] = -ap.max_desc
             problem.bounds.parameter.upper[3*p+2] = ap.max_climb
-            problem.guess.phase[p].time = [0, 1]
+            problem.guess.phase[p].time = [0+p, 1+p]
 
         # Make sure that all discrete constraints are strictly enforced.
-        problem.bounds.discrete.lower[:] = problem.bounds.discrete.upper[:] = 0
+        problem.bounds.discrete.lower[0:5*last_phase_idx] = 0
+        problem.bounds.discrete.upper[0:5*last_phase_idx] = 0
+        problem.bounds.discrete.lower[5*last_phase_idx:] = 1e-8
 
         # Define initial conditions based on StartConstraint of Trajectory.
         problem.bounds.phase[0].initial_time.upper = 0
