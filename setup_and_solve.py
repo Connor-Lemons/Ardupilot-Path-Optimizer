@@ -20,9 +20,11 @@ class Constraint:
         phi_deg (float, optional, default=0.0): Required bearing [deg]
         directional (bool, optional, default=False): Whether to enforce the bearing
         tolerance (float, optional, default=1.0): Required spatial tolerance, must be >= 1.0 [m]
+        bearing_tolerance (float, optional, default=5.0): Required bearing tolerance, must be >= 1.0 [deg]
 
     Properties:
         phi(float): Bearing in radians [rad]
+        bearing_tolerance (float): Bearing tolerance in radians [rad]
     '''
     x: float
     y: float
@@ -30,15 +32,22 @@ class Constraint:
     phi_deg: Optional[float] = 0.0
     directional: Optional[bool] = False
     tolerance: Optional[float] = 1.0
+    bearing_tolerance_deg: Optional[float] = 5.0
 
     @property
     def phi(self):
         return np.deg2rad(self.phi_deg)
+    
+    @property
+    def bearing_tolerance(self):
+        return np.deg2rad(self.bearing_tolerance_deg)
 
 
     def __post_init__(self):
         if self.tolerance < 1.0 and not isinstance(self, StartConstraint):
             raise ValueError("tolerance must be >= 1.0.")
+        if self.bearing_tolerance_deg < 1.0:
+            raise ValueError("bearing_tolerance_deg must be >= 1.0.")
 
     def state(self, full_size=True):
         '''
@@ -64,8 +73,10 @@ class StartConstraint(Constraint):
 
     Properties:
         directional (bool, default=True): Whether to enforce the bearing, must be True
-        tolerance (float, default=0.0): Required spatial tolerance, must be 0 [m]
-        phi(float): Bearing in radians [rad]
+        tolerance (float, default=1.0): Required spatial tolerance, must be 1 [m]
+        bearing_tolerance_deg (float, default=1.0): Required bearing tolerance, must be 1 [deg]
+        phi (float): Bearing in radians [rad]
+        bearing_tolerance (float): Bearing tolerance in radians [rad]
     '''
     def __init__(self, x: float, y: float, z: float, phi_deg: float, **kwargs):
         if "directional" in kwargs:
@@ -74,9 +85,13 @@ class StartConstraint(Constraint):
             )
         if "tolerance" in kwargs:
             raise ValueError(
-                "Cannot set 'tolerance' for StartConstraint: defaults to 0.0."
+                "Cannot set 'tolerance' for StartConstraint: defaults to 1.0."
             )
-        super().__init__(x=x, y=y, z=z, phi_deg=phi_deg, directional=True, tolerance=0.0, **kwargs)
+        if "bearing_tolerance_deg" in kwargs:
+             raise ValueError(
+                "Cannot set 'bearing_tolerance_deg' for StartConstraint: defaults to 1.0."
+            )
+        super().__init__(x=x, y=y, z=z, phi_deg=phi_deg, directional=True, tolerance=1.0, bearing_tolerance_deg=1.0, **kwargs)
 
 @dataclass
 class ExtendedConstraint(Constraint):
@@ -277,12 +292,12 @@ class OptimizerParameters:
         tol (float, optional, default=1e-8): Ipopt tolerance
     '''
     time_weight: Optional[float] = 1
-    turn_weight: Optional[float] = 1
+    turn_weight: Optional[float] = 0.01
     speed_weight: Optional[float] = 1
     climb_weight: Optional[float] = 1
-    segments: Optional[int] = 10
-    points: Optional[int] = 10
-    tol: Optional[float] = 1e-8
+    segments: Optional[int] = 9
+    points: Optional[int] = 3
+    tol: Optional[float] = 1e-6
 
     def get_weights(self):
         return np.array([self.time_weight,
@@ -384,18 +399,18 @@ class Optimizer:
         problem = yapss.Problem(name = "Constraints to Trajectory",
                                 nx = [4]*tot_phase,
                                 ns = 3*tot_phase,
-                                nd = 5*(tot_phase-1)+tot_phase)
+                                nd = 5*(tot_phase-1)+num_constr)
         
         # Define the objective function.
         def objective(arg):
             param = arg.parameter
-            objective = W_t*arg.phase[last_phase_idx].final_time**2
+            objective = W_t*arg.phase[last_phase_idx].final_time
             # Add the parameters (controls) for each phase iteratively to the objective function.
             for p in range(tot_phase):
                 objective += (
-                W_r*param[3*p]**2 +
-                W_v*(param[3*p+1] - ap.V_cruise)**2 +
-                W_c*param[3*p+2]**2
+                W_r*(param[3*p]/(1/ap.min_turn))**2 +
+                W_v*((param[3*p+1] - ap.V_cruise)/ap.V_cruise)**2 +
+                W_c*(param[3*p+2]/max(ap.max_climb, ap.max_desc))**2
                 )
             arg.objective = objective
 
@@ -419,8 +434,8 @@ class Optimizer:
             for p in range(last_phase_idx):
                 discrete.append(arg.phase[p].final_time - arg.phase[p+1].initial_time)
                 discrete.extend(arg.phase[p].final_state - arg.phase[p+1].initial_state)
-            for p in range(tot_phase):
-                discrete.append(arg.phase[p].final_time - arg.phase[p].initial_time)
+            for c in range(num_constr):
+                discrete.append(math.cos(arg.phase[(c+1)*traj.phases_per_constraint-1].final_state[3] - traj.constraints[c].phi))
             arg.discrete = discrete
 
         # Pass the defined functions to YAPSS.
@@ -432,7 +447,6 @@ class Optimizer:
         for p in range(tot_phase):
             problem.bounds.phase[p].initial_time.lower = 0
             problem.bounds.phase[p].final_time.lower = 0
-            problem.bounds.phase[p].duration.lower = 1e-8
             problem.bounds.parameter.lower[3*p] = -1/ap.min_turn
             problem.bounds.parameter.upper[3*p] = 1/ap.min_turn
             problem.bounds.parameter.lower[3*p+1] = ap.V_min
@@ -440,16 +454,23 @@ class Optimizer:
             problem.guess.parameter[3*p+1] = ap.V_cruise
             problem.bounds.parameter.lower[3*p+2] = -ap.max_desc
             problem.bounds.parameter.upper[3*p+2] = ap.max_climb
-            problem.guess.phase[p].time = [0+p, 1+p]
+            problem.guess.phase[p].time = [0, 1]
 
-        # Make sure that all discrete constraints are strictly enforced.
-        problem.bounds.discrete.lower[0:5*last_phase_idx] = 0
-        problem.bounds.discrete.upper[0:5*last_phase_idx] = 0
-        problem.bounds.discrete.lower[5*last_phase_idx:] = 1e-8
+        # Make sure that all discrete constraints are enforced.
+        problem.bounds.discrete.lower[0:5*(tot_phase-1)] = -1e-6
+        problem.bounds.discrete.upper[0:5*(tot_phase-1)] = 1e-6
+        problem.bounds.discrete.lower[0:5*(tot_phase-1):5]
+        problem.bounds.discrete.upper[0:5*(tot_phase-1):5] = 0
+        problem.bounds.discrete.lower[5*(tot_phase-1):] = -1
+        problem.bounds.discrete.upper[5*(tot_phase-1):] = 1
+        
 
         # Define initial conditions based on StartConstraint of Trajectory.
         problem.bounds.phase[0].initial_time.upper = 0
-        problem.bounds.phase[0].initial_state.lower = problem.bounds.phase[0].initial_state.upper = traj.start.state()
+        problem.bounds.phase[0].initial_state.lower[0:3] = traj.start.state(False) - np.array([traj.start.tolerance]*3)
+        problem.bounds.phase[0].initial_state.upper[0:3] = traj.start.state(False) + np.array([traj.start.tolerance]*3)
+        problem.bounds.phase[0].initial_state.lower[3] = traj.start.phi - traj.start.bearing_tolerance
+        problem.bounds.phase[0].initial_state.upper[3] = traj.start.phi + traj.start.bearing_tolerance
 
         # Iteratively enforce constraints at correct phases to maintain phases_per_constraint.
         for i in range(num_constr):
@@ -460,7 +481,8 @@ class Optimizer:
             current_phase.final_state.upper[0:3] = current_constraint.state(False) + np.array([current_constraint.tolerance]*3)
             # Enforce bearing if Constraint is directional.
             if current_constraint.directional:
-                current_phase.final_state.lower[3] = current_phase.final_state.upper[3] = current_constraint.phi
+                problem.bounds.discrete.lower[5*(tot_phase-1)+i] = math.cos(current_constraint.bearing_tolerance)
+                problem.bounds.discrete.upper[5*(tot_phase-1)+i] = 1
 
             # Enforce ExtendedConstraint if applicable.
             if isinstance(current_constraint, ExtendedConstraint):
@@ -483,8 +505,9 @@ class Optimizer:
                     current_phase.duration.lower = current_phase.duration.upper = current_constraint.duration
 
         # Set the problem mesh.
-        problem.mesh.phase[0].collocation_points = optim_params.segments * [optim_params.points]
-        problem.mesh.phase[0].fraction = optim_params.segments * [1 / optim_params.segments]
+        for p in range(tot_phase):
+            problem.mesh.phase[p].collocation_points = optim_params.segments * [optim_params.points]
+            problem.mesh.phase[p].fraction = optim_params.segments * [1 / optim_params.segments]
         # Set the IPOPT tolerance.
         problem.ipopt_options.tol = optim_params.tol
         # Suppress IPOPT outputs.
