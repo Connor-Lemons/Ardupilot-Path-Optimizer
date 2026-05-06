@@ -302,7 +302,7 @@ class OptimizerParameters:
     speed_weight: Optional[float] = 10
     climb_weight: Optional[float] = 1
     segments: Optional[int] = 9
-    points: Optional[int] = 6
+    points: Optional[int] = 3
     tol: Optional[float] = 1e-6
 
     def get_weights(self):
@@ -400,7 +400,7 @@ class Optimizer:
 
         problem.functions.objective = objective
 
-        problem.bounds.phase[0].final_time.lower = dist/self.ap.V_cruise
+        problem.bounds.phase[0].final_time.lower = min(dist/self.ap.V_cruise, 2*np.pi*self.ap.max_turn/self.ap.V_cruise + z_dist/self.ap.V_cruise)
         problem.bounds.phase[0].final_time.upper = 2*np.pi*self.ap.max_turn/self.ap.V_cruise + z_dist/self.ap.V_cruise
         problem.bounds.phase[0].initial_state.lower = problem.bounds.phase[0].initial_state.upper = np.concatenate((st, [dir]))
 
