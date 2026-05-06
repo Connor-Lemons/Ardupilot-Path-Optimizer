@@ -21,3 +21,9 @@
 - Implement better guesses
 
 - Negative radius currently gives CW turns
+
+- Add partial presolve for adding just a few constraints
+
+- Add iterate with more phases option
+
+- Add type hints

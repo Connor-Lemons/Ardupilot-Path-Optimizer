@@ -20,11 +20,9 @@ class Constraint:
         phi_deg (float, optional, default=0.0): Required bearing [deg]
         directional (bool, optional, default=False): Whether to enforce the bearing
         tolerance (float, optional, default=1.0): Required spatial tolerance, must be >= 1.0 [m]
-        bearing_tolerance (float, optional, default=5.0): Required bearing tolerance, must be >= 1.0 [deg]
 
     Properties:
         phi(float): Bearing in radians [rad]
-        bearing_tolerance (float): Bearing tolerance in radians [rad]
     '''
     x: float
     y: float
@@ -32,22 +30,14 @@ class Constraint:
     phi_deg: Optional[float] = 0.0
     directional: Optional[bool] = False
     tolerance: Optional[float] = 1.0
-    bearing_tolerance_deg: Optional[float] = 5.0
 
     @property
     def phi(self):
         return np.deg2rad(self.phi_deg)
-    
-    @property
-    def bearing_tolerance(self):
-        return np.deg2rad(self.bearing_tolerance_deg)
-
 
     def __post_init__(self):
         if self.tolerance < 1.0 and not isinstance(self, StartConstraint):
             raise ValueError("tolerance must be >= 1.0.")
-        if self.bearing_tolerance_deg < 1.0:
-            raise ValueError("bearing_tolerance_deg must be >= 1.0.")
 
     def state(self, full_size=True):
         '''
@@ -74,9 +64,6 @@ class StartConstraint(Constraint):
     Properties:
         directional (bool, default=True): Whether to enforce the bearing, must be True
         tolerance (float, default=1.0): Required spatial tolerance, must be 1 [m]
-        bearing_tolerance_deg (float, default=1.0): Required bearing tolerance, must be 1 [deg]
-        phi (float): Bearing in radians [rad]
-        bearing_tolerance (float): Bearing tolerance in radians [rad]
     '''
     def __init__(self, x: float, y: float, z: float, phi_deg: float, **kwargs):
         if "directional" in kwargs:
@@ -87,11 +74,7 @@ class StartConstraint(Constraint):
             raise ValueError(
                 "Cannot set 'tolerance' for StartConstraint: defaults to 1.0."
             )
-        if "bearing_tolerance_deg" in kwargs:
-             raise ValueError(
-                "Cannot set 'bearing_tolerance_deg' for StartConstraint: defaults to 1.0."
-            )
-        super().__init__(x=x, y=y, z=z, phi_deg=phi_deg, directional=True, tolerance=1.0, bearing_tolerance_deg=1.0, **kwargs)
+        super().__init__(x=x, y=y, z=z, phi_deg=phi_deg, directional=True, tolerance=1.0, **kwargs)
 
 @dataclass
 class ExtendedConstraint(Constraint):
@@ -109,8 +92,8 @@ class ExtendedConstraint(Constraint):
         phi_deg (float, optional, default=0.0): Required bearing [deg]
         directional (bool, optional, default=False): Whether to enforce the bearing
         tolerance (float, optional, default=1.0): Required spatial tolerance, must be >= 1.0 [m]
-        radius (float, optional, default=None): Required turn radius, negative for CCW, positive for CW [m]
-        radius_tol (float, optional, default=None): Tolerance on radius constraint, set to None to disable [m]
+        bank_deg (float, optional, default=None): Required bank angle [deg]
+        bank_deg_tol (float, optional, default=None): Tolerance on bank constraint, set to None to disable [deg]
         speed (float, optional, default=None): Required speed [m/s]
         speed_tol (float, optional, default=None): Tolerance on speed constraint, set to None to disable [m/s]
         climb (float, optional, default=None): Required climb rate [m/s]
@@ -118,22 +101,35 @@ class ExtendedConstraint(Constraint):
         duration (float, optional, default=None): Duration before spatial point that the constraints will be met [s]
 
     Properties:
-        phi(float): Bearing in radians [rad]
+        phi (float): Bearing in radians [rad]
+        bank (float): Bank angle in radians [rad]
     '''
-    radius: Optional[float] = None
-    radius_tol: Optional[float] = None
+    bank_deg: Optional[float] = None
+    bank_deg_tol: Optional[float] = None
     speed: Optional[float] = None
     speed_tol: Optional[float] = None
     climb: Optional[float] = None
     climb_tol: Optional[float] = None
     duration: Optional[float] = None
 
+    @property
+    def bank(self):
+        if self.bank_deg is None:
+            return None
+        return np.deg2rad(self.bank_deg)
+
+    @property
+    def bank_tol(self):
+        if self.bank_deg_tol is None:
+            return None
+        return np.deg2rad(self.bank_deg_tol)
+
     def __post_init__(self):
-        if self.radius_tol is not None:
-            if self.radius is None:
-                raise ConstraintError("radius_tol is set, but radius is not.")
-            if self.radius_tol < 0:
-                raise ValueError("radius_tol must be nonnegative.")
+        if self.bank_deg_tol is not None:
+            if self.bank_deg is None:
+                raise ConstraintError("bank_deg_tol is set, but bank_deg is not.")
+            if self.bank_deg_tol < 0:
+                raise ValueError("bank_deg_tol must be nonnegative.")
         if self.speed_tol is not None:
             if self.speed is None:
                 raise ConstraintError("speed_tol is set, but speed is not.")
@@ -219,7 +215,7 @@ class Trajectory:
             raise ValueError("Must have at least one constraint to define the trajectory.")
         self.constraints.pop(idx-1)
         
-    def trajectory(self):
+    def trajectory(self) -> list[Constraint]:
         '''
         Returns the full trajectory as a list of constraints.
         '''
@@ -230,6 +226,16 @@ class Trajectory:
         Returns the full trajectory as a list of states (np arrays). If False is passed, only returns spatial coordinates of states.
         '''
         return np.array([self.start.state(full_size=full_size), *(constraint.state(full_size=full_size) for constraint in self.constraints)])
+    
+    def distances(self):
+        '''
+        Calculates the Euclidian distances between each constraint.
+        '''
+        dist = []
+        states = self.trajectory_states(False)
+        for p in range(len(self.constraints)):
+            dist.append(np.linalg.norm(states[p+1] - states[p]))
+        return np.array(dist)
     
 @dataclass
 class ArdupilotParameters:
@@ -292,11 +298,11 @@ class OptimizerParameters:
         tol (float, optional, default=1e-8): Ipopt tolerance
     '''
     time_weight: Optional[float] = 1
-    turn_weight: Optional[float] = 0.01
+    turn_weight: Optional[float] = 1
     speed_weight: Optional[float] = 1
     climb_weight: Optional[float] = 1
     segments: Optional[int] = 9
-    points: Optional[int] = 3
+    points: Optional[int] = 6
     tol: Optional[float] = 1e-6
 
     def get_weights(self):
@@ -330,7 +336,7 @@ class TrajectorySolution:
     z_sol: List[float]
     phi_sol: List[float]
     phi_deg_sol: List[float]
-    r_inv_sol: List[float]
+    bank_sol: List[float]
     r_sol: List[float]
     V_sol: List[float]
     omega_sol: List[float]
@@ -360,6 +366,7 @@ class Optimizer:
         self.traj = traj
         self.ap = ap
         self.optim_params = optim_params
+        self.initial = None
         self.problem = None
         self.solution = None
         self.Sol = None
@@ -369,8 +376,8 @@ class Optimizer:
     def __post_init__(self):
         for constraint in self.traj.constraints:
             if isinstance(constraint, ExtendedConstraint):
-                if constraint.radius_tol is not None and (np.abs(constraint.radius) < self.ap.min_turn or np.abs(constraint.radius) > self.ap.max_turn):
-                    warnings.warn(f"Radius constraint |{constraint.radius}| [m] is out of given Ardupilot bounds [{self.ap.min_turn}, {self.ap.max_turn}]. "
+                if constraint.bank_deg_tol is not None and (np.abs(constraint.bank_deg) < self.ap.roll_min or np.abs(constraint.bank_deg) > self.ap.roll_limit):
+                    warnings.warn(f"Bank constraint |{constraint.bank_deg}| [deg] is out of given Ardupilot bounds [{self.ap.roll_min}, {self.ap.roll_limit}]. "
                                   "This is likely to cause errors with the optimizer.", ConstraintWarning)
                 if constraint.speed_tol is not None and (constraint.speed < self.ap.V_min or constraint.speed > self.ap.V_max):
                     warnings.warn(f"Speed constraint {constraint.speed} [m/s] is out of given Ardupilot bounds [{self.ap.V_min}, {self.ap.V_max}]. "
@@ -378,11 +385,102 @@ class Optimizer:
                 if constraint.climb_tol is not None and (constraint.climb < -self.ap.max_desc or constraint.climb > self.ap.max_climb):
                     warnings.warn(f"Climb constraint {constraint.climb} [m/s] is out of given Ardupilot bounds [{-self.ap.max_desc}, {self.ap.max_climb}]. "
                                   "This is likely to cause errors with the optimizer.", ConstraintWarning)
+                    
+    def initial_solver(self, problem, st, tgt):
+        '''
+        Solver for initial guess.
+        '''
+        dist = np.sqrt((st[0] - tgt[0])**2 + (st[1] - tgt[1])**2 + (st[2] - tgt[2])**2)
+        z_dist = np.abs(st[2] - tgt[2])
+
+        def objective(arg):
+            x, y, z, phi= arg.phase[0].final_state
+            arg.objective = arg.phase[0].final_time + (x - tgt[0])**2 + (y - tgt[1])**2 + (z - tgt[2])**2
+
+        problem.functions.objective = objective
+
+        problem.bounds.phase[0].final_time.lower = dist/self.ap.V_cruise
+        problem.bounds.phase[0].final_time.upper = 2*np.pi*self.ap.max_turn/self.ap.V_cruise + z_dist/self.ap.V_cruise
+        problem.bounds.phase[0].initial_state.lower = problem.bounds.phase[0].initial_state.upper = st
+
+        problem.guess.phase[0].state = [
+            [st[0], tgt[0]],
+            [st[1], tgt[1]],
+            [st[2], tgt[2]],
+            [st[3], 0]
+            ]
+
+        if np.cos(st[3])*(tgt[1] - st[1]) - np.sin(st[3])*(tgt[0] - st[0]) > 0:
+            problem.bounds.parameter.lower = [self.ap.roll_min_rad, -self.ap.max_desc]
+            problem.bounds.parameter.upper = [self.ap.roll_limit_rad, self.ap.max_climb]
+            problem.guess.parameter = [np.pi/4, 0]
+        else:
+            problem.bounds.parameter.lower = [-self.ap.roll_limit_rad, -self.ap.max_desc]
+            problem.bounds.parameter.upper = [-self.ap.roll_min_rad, self.ap.max_climb]
+            problem.guess.parameter = [-np.pi/4, 0]
+
+        sol = problem.solve()
+        t = sol.phase[0].time
+        x, y, z, dir = sol.phase[0].state
+        bank, climb = sol.parameter
+
+        return t, np.array([x, y, z, dir]), np.array([bank, self.ap.V_cruise, climb])
+    
+    def presolve(self):
+        '''
+        Presolves a relaxed version of the problem to generate an initial guess.
+        '''
+        self.initial = {}
+
+        prob = yapss.Problem(name = "Constraints to Trajectory",
+                                nx = [4],
+                                ns = 2)
+
+        def continuous(arg):
+            x, y, z, phi = arg.phase[0].state
+            bank, omega = arg.parameter
+            xdot = self.ap.V_cruise*math.cos(phi)
+            ydot = self.ap.V_cruise*math.sin(phi)
+            zdot = omega
+            phidot = 9.80665*math.tan(bank)/self.ap.V_cruise
+            arg.phase[0].dynamics = [xdot, ydot, zdot, phidot]
+
+        prob.functions.continuous = continuous
+
+        prob.bounds.phase[0].initial_time.lower = prob.bounds.phase[0].initial_time.upper = 0
+        prob.guess.phase[0].time = [0, 10]
+
+        segments, points = 9, 3
+        prob.mesh.phase[0].collocation_points = segments * [points]
+        prob.mesh.phase[0].fraction = segments * [1 / segments]
+        prob.ipopt_options.tol = 1e-3
+
+        constr_list = self.traj.trajectory()
+        for c in range(len(constr_list)-1):
+            start = constr_list[c]
+            end = constr_list[c+1]
+
+            if start.directional == True:
+                dir1 = start.phi
+            else:
+                dir1 = np.atan2((start.y - constr_list[c-1].y), (start.x - constr_list[c-1].x))
+
+            if np.atan2((end.y - start.y), (end.x - start.x)) == dir1:
+                t_end = np.linalg.norm(end.state(False) - start.state(False))/self.ap.V_cruise
+                self.initial[f"constr{c}_time"] = np.array([0.0, t_end])
+                self.initial[f"constr{c}_state"] = np.array([[start.x, end.x], [start.y, end.y], [start.z, end.z], [dir1, dir1]])
+                self.initial[f"constr{c}_params"] = np.array([0, self.ap.V_cruise, 0])
+            else:
+                self.initial[f"constr{c}_time"], self.initial[f"constr{c}_state"], self.initial[f"constr{c}_params"] = self.initial_solver(prob, start.state(), end.state())
 
     def setup(self):
         '''
         Creates the YAPSS problem to solve. Can be precomputed to improve speed of self.solve().
         '''
+        # Checks to see if () has been run and runs it if not.
+        if self.initial is None:
+            self.presolve()
+
         traj = self.traj
         ap = self.ap
         optim_params = self.optim_params
@@ -395,24 +493,21 @@ class Optimizer:
         tot_phase = num_constr*traj.phases_per_constraint
         last_phase_idx = tot_phase-1
 
+        #
+        constr_dist = traj.distances()
+
         # Creates the YAPSS problem, nx defines the number of states (and phases via its structure), ns defines the number of parameters (global to the problem), and nd defines the number of discrete constraints necessary.
         problem = yapss.Problem(name = "Constraints to Trajectory",
                                 nx = [4]*tot_phase,
                                 ns = 3*tot_phase,
-                                nd = 5*(tot_phase-1)+num_constr)
+                                nd = 5*(tot_phase-1),
+                                nq = [1]*tot_phase)
         
         # Define the objective function.
         def objective(arg):
-            param = arg.parameter
-            objective = W_t*arg.phase[last_phase_idx].final_time
-            # Add the parameters (controls) for each phase iteratively to the objective function.
+            arg.objective = W_t*arg.phase[-1].final_time
             for p in range(tot_phase):
-                objective += (
-                W_r*(param[3*p]/(1/ap.min_turn))**2 +
-                W_v*((param[3*p+1] - ap.V_cruise)/ap.V_cruise)**2 +
-                W_c*(param[3*p+2]/max(ap.max_climb, ap.max_desc))**2
-                )
-            arg.objective = objective
+                arg.objective += arg.phase[p].integral[0]
 
         # Define the continuous function (system dynamics and controls).
         def continuous(arg):
@@ -420,12 +515,18 @@ class Optimizer:
             # Define the system dynamics for each phase.
             for p in range(tot_phase):
                 x, y, z, phi = arg.phase[p].state
-                r_inv, V, omega = params[3*p:3*p+3]
+                bank, V, omega = params[3*p:3*p+3]
                 xdot = V*math.cos(phi)
                 ydot = V*math.sin(phi)
                 zdot = omega
-                phidot = V*r_inv
+                phidot = 9.80665*math.tan(bank)/V
                 arg.phase[p].dynamics = [xdot, ydot, zdot, phidot]
+                # Define the integral cost
+                arg.phase[p].integrand[0] = (
+                    W_r*(bank/ap.roll_limit_rad)**2
+                    + W_v*((V - ap.V_cruise)/ap.V_cruise)**2
+                    + W_c*(omega/ap.max_climb)**2
+                )
 
         # Define the discrete function (discrete constraints).
         def discrete(arg):
@@ -434,8 +535,6 @@ class Optimizer:
             for p in range(last_phase_idx):
                 discrete.append(arg.phase[p].final_time - arg.phase[p+1].initial_time)
                 discrete.extend(arg.phase[p].final_state - arg.phase[p+1].initial_state)
-            for c in range(num_constr):
-                discrete.append(math.cos(arg.phase[(c+1)*traj.phases_per_constraint-1].final_state[3] - traj.constraints[c].phi))
             arg.discrete = discrete
 
         # Pass the defined functions to YAPSS.
@@ -447,30 +546,59 @@ class Optimizer:
         for p in range(tot_phase):
             problem.bounds.phase[p].initial_time.lower = 0
             problem.bounds.phase[p].final_time.lower = 0
-            problem.bounds.parameter.lower[3*p] = -1/ap.min_turn
-            problem.bounds.parameter.upper[3*p] = 1/ap.min_turn
+            problem.bounds.parameter.lower[3*p] = -ap.roll_limit_rad
+            problem.bounds.parameter.upper[3*p] = ap.roll_limit_rad
             problem.bounds.parameter.lower[3*p+1] = ap.V_min
             problem.bounds.parameter.upper[3*p+1] = ap.V_max
-            problem.guess.parameter[3*p+1] = ap.V_cruise
             problem.bounds.parameter.lower[3*p+2] = -ap.max_desc
             problem.bounds.parameter.upper[3*p+2] = ap.max_climb
             problem.guess.phase[p].time = [0, 1]
 
+        # Add in guesses from preliminary solutions
+        global_t0 = 0.0
+        for c in range(num_constr):
+            time_leg = np.asarray(self.initial[f"constr{c}_time"]).copy()
+            state_leg = np.asarray(self.initial[f"constr{c}_state"]).copy()
+            state_leg[3] = np.unwrap(state_leg[3])
+            param_leg = np.asarray(self.initial[f"constr{c}_params"]).copy()
+
+            time_leg = time_leg - time_leg[0]
+            time_leg, unique_idx = np.unique(time_leg, return_index=True)
+            state_leg = state_leg[:, unique_idx]
+            t_inter = np.linspace(time_leg[0], time_leg[-1], traj.phases_per_constraint + 1)
+
+            for i in range(traj.phases_per_constraint):
+                t0 = t_inter[i]
+                t1 = t_inter[i+1]
+                t_range_idx = (time_leg > t0 + 1e-12) & (time_leg < t1 - 1e-12)
+                t_range = np.concatenate(([t0], time_leg[t_range_idx], [t1]))
+                t_range = np.unique(t_range)
+                state_sub = np.vstack([np.interp(t_range, time_leg, state_leg[k]) for k in range(4)])
+                t_sub = t_range + global_t0
+                param_sub = param_leg
+
+                phase_idx = i + c*traj.phases_per_constraint
+                problem.guess.phase[phase_idx].time = t_sub
+                problem.guess.phase[phase_idx].state = state_sub
+                problem.guess.parameter[3*phase_idx:3*phase_idx+3] = param_sub
+
+            global_t0 += time_leg[-1]
+
+
+
         # Make sure that all discrete constraints are enforced.
-        problem.bounds.discrete.lower[0:5*(tot_phase-1)] = -1e-6
-        problem.bounds.discrete.upper[0:5*(tot_phase-1)] = 1e-6
-        problem.bounds.discrete.lower[0:5*(tot_phase-1):5]
+        problem.bounds.discrete.lower[0:5*(tot_phase-1)] = -1e-8
+        problem.bounds.discrete.upper[0:5*(tot_phase-1)] = 1e-8
+        problem.bounds.discrete.lower[0:5*(tot_phase-1):5] = 0
         problem.bounds.discrete.upper[0:5*(tot_phase-1):5] = 0
-        problem.bounds.discrete.lower[5*(tot_phase-1):] = -1
-        problem.bounds.discrete.upper[5*(tot_phase-1):] = 1
         
 
         # Define initial conditions based on StartConstraint of Trajectory.
         problem.bounds.phase[0].initial_time.upper = 0
         problem.bounds.phase[0].initial_state.lower[0:3] = traj.start.state(False) - np.array([traj.start.tolerance]*3)
         problem.bounds.phase[0].initial_state.upper[0:3] = traj.start.state(False) + np.array([traj.start.tolerance]*3)
-        problem.bounds.phase[0].initial_state.lower[3] = traj.start.phi - traj.start.bearing_tolerance
-        problem.bounds.phase[0].initial_state.upper[3] = traj.start.phi + traj.start.bearing_tolerance
+        problem.bounds.phase[0].initial_state.lower[3] = traj.start.phi
+        problem.bounds.phase[0].initial_state.upper[3] = traj.start.phi
 
         # Iteratively enforce constraints at correct phases to maintain phases_per_constraint.
         for i in range(num_constr):
@@ -481,16 +609,16 @@ class Optimizer:
             current_phase.final_state.upper[0:3] = current_constraint.state(False) + np.array([current_constraint.tolerance]*3)
             # Enforce bearing if Constraint is directional.
             if current_constraint.directional:
-                problem.bounds.discrete.lower[5*(tot_phase-1)+i] = math.cos(current_constraint.bearing_tolerance)
-                problem.bounds.discrete.upper[5*(tot_phase-1)+i] = 1
+                current_phase.final_state.lower[3] = current_constraint.phi
+                current_phase.final_state.upper[3] = current_constraint.phi
 
             # Enforce ExtendedConstraint if applicable.
             if isinstance(current_constraint, ExtendedConstraint):
                 # Turn radius constraint.
-                if current_constraint.radius_tol is not None:
-                    radius_bounds = [1/(current_constraint.radius - current_constraint.radius_tol), 1/(current_constraint.radius + current_constraint.radius_tol)]
-                    problem.bounds.parameter.lower[3*current_phase_idx] = min(radius_bounds)
-                    problem.bounds.parameter.upper[3*current_phase_idx] = max(radius_bounds)
+                if current_constraint.bank_tol is not None:
+                    bank_bounds = [current_constraint.bank - current_constraint.bank_tol, current_constraint.bank + current_constraint.bank_tol]
+                    problem.bounds.parameter.lower[3*current_phase_idx] = min(bank_bounds)
+                    problem.bounds.parameter.upper[3*current_phase_idx] = max(bank_bounds)
                 # Speed constraint.
                 if current_constraint.speed_tol is not None:
                     problem.bounds.parameter.lower[3*current_phase_idx+1] = current_constraint.speed - current_constraint.speed_tol
@@ -555,7 +683,7 @@ class Optimizer:
         z_sol = []
         phi_sol = []
         phi_deg_sol = []
-        r_inv_sol = []
+        bank_sol = []
         r_sol = []
         V_sol = []
         omega_sol = []
@@ -576,22 +704,19 @@ class Optimizer:
             phi_sol.extend(phi_temp)
             phi_deg_sol.extend(np.rad2deg(phi_temp))
             # Stitch the controls together
-            r_inv_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
+            bank_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
             # If the requested control radius is larger than the maximum allowed turn, treat it as a straight trajectory.
-            if np.abs(r_inv_temp) < np.reciprocal(ap.max_turn):
-                r_inv_temp = 0
-            r_inv_sol.extend([r_inv_temp])
+            bank_sol.extend([bank_temp])
             # Generate the radius solution.
-            if r_inv_temp == 0:
-                r_sol.extend([r_inv_temp])
+            if bank_temp == 0:
+                r_sol.extend([0])
             else:
-                r_sol.extend([np.reciprocal(r_inv_temp)])
-            # Generate the speed and climb solutions.
+                r_sol.extend([V_temp**2/(9.80665*np.tan(bank_temp))])
             V_sol.extend([V_temp])
             omega_sol.extend([omega_temp])
 
         # Extract the problem into a TrajectorySolution object.
-        self.Sol = TrajectorySolution(t_sol, t_phase_sol, x_sol, y_sol, z_sol, phi_sol, phi_deg_sol, r_inv_sol, r_sol, V_sol, omega_sol)
+        self.Sol = TrajectorySolution(t_sol, t_phase_sol, x_sol, y_sol, z_sol, phi_sol, phi_deg_sol, bank_sol, r_sol, V_sol, omega_sol)
         return self.Sol
 
     def plot(self):
@@ -635,13 +760,11 @@ class Optimizer:
         ax2 = fig.add_subplot(2, 2, 2)
         for p in range(tot_phase):
             t_temp = sol.phase[p].time
-            r_inv_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
-            if np.abs(r_inv_temp) < np.reciprocal(ap.max_turn):
-                r_inv_temp = 0
-            if r_inv_temp == 0:
-                r_temp = r_inv_temp
+            bank_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
+            if np.abs(bank_temp) < ap.roll_min_rad:
+                r_temp = 0
             else:
-                r_temp = np.reciprocal(r_inv_temp)
+                r_temp = V_temp**2/(9.80665*np.tan(bank_temp))
             ax2.plot([t_temp[0], t_temp[-1]], [r_temp, r_temp])
         ax2.set_xlim(Sol.t_sol[0], Sol.t_sol[-1])
         ax2.set_xticks(Sol.t_phase_sol)
@@ -654,7 +777,7 @@ class Optimizer:
         ax3 = fig.add_subplot(2, 2, 3)
         for p in range(tot_phase):
             t_temp = sol.phase[p].time
-            r_inv_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
+            bank_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
             ax3.plot([t_temp[0], t_temp[-1]], [V_temp, V_temp])
         ax3.set_xlim(Sol.t_sol[0], Sol.t_sol[-1])
         ax3.set_xticks(Sol.t_phase_sol)
@@ -667,7 +790,7 @@ class Optimizer:
         ax4 = fig.add_subplot(2, 2, 4)
         for p in range(tot_phase):
             t_temp = sol.phase[p].time
-            r_inv_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
+            bank_temp, V_temp, omega_temp = sol.parameter[3*p:3*p+3]
             ax4.plot([t_temp[0], t_temp[-1]], [omega_temp, omega_temp])
         ax4.set_xlim(Sol.t_sol[0], Sol.t_sol[-1])
         ax4.set_xticks(Sol.t_phase_sol)
