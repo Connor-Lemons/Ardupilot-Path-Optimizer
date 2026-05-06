@@ -297,9 +297,9 @@ class OptimizerParameters:
         points (int, optional, default=1): Number of collocation points per segment in the mesh
         tol (float, optional, default=1e-8): Ipopt tolerance
     '''
-    time_weight: Optional[float] = 1
+    time_weight: Optional[float] = 10
     turn_weight: Optional[float] = 1
-    speed_weight: Optional[float] = 1
+    speed_weight: Optional[float] = 10
     climb_weight: Optional[float] = 1
     segments: Optional[int] = 9
     points: Optional[int] = 6
@@ -367,6 +367,7 @@ class Optimizer:
         self.ap = ap
         self.optim_params = optim_params
         self.initial = None
+        self.fig_initial = None
         self.problem = None
         self.solution = None
         self.Sol = None
@@ -386,9 +387,9 @@ class Optimizer:
                     warnings.warn(f"Climb constraint {constraint.climb} [m/s] is out of given Ardupilot bounds [{-self.ap.max_desc}, {self.ap.max_climb}]. "
                                   "This is likely to cause errors with the optimizer.", ConstraintWarning)
                     
-    def initial_solver(self, problem, st, tgt):
+    def initial_solver(self, problem, st, tgt, dir):
         '''
-        Solver for initial guess.
+        Solver for the initial guess.
         '''
         dist = np.sqrt((st[0] - tgt[0])**2 + (st[1] - tgt[1])**2 + (st[2] - tgt[2])**2)
         z_dist = np.abs(st[2] - tgt[2])
@@ -401,16 +402,16 @@ class Optimizer:
 
         problem.bounds.phase[0].final_time.lower = dist/self.ap.V_cruise
         problem.bounds.phase[0].final_time.upper = 2*np.pi*self.ap.max_turn/self.ap.V_cruise + z_dist/self.ap.V_cruise
-        problem.bounds.phase[0].initial_state.lower = problem.bounds.phase[0].initial_state.upper = st
+        problem.bounds.phase[0].initial_state.lower = problem.bounds.phase[0].initial_state.upper = np.concatenate((st, [dir]))
 
         problem.guess.phase[0].state = [
             [st[0], tgt[0]],
             [st[1], tgt[1]],
             [st[2], tgt[2]],
-            [st[3], 0]
+            [dir, 0]
             ]
 
-        if np.cos(st[3])*(tgt[1] - st[1]) - np.sin(st[3])*(tgt[0] - st[0]) > 0:
+        if np.cos(dir)*(tgt[1] - st[1]) - np.sin(dir)*(tgt[0] - st[0]) > 0:
             problem.bounds.parameter.lower = [self.ap.roll_min_rad, -self.ap.max_desc]
             problem.bounds.parameter.upper = [self.ap.roll_limit_rad, self.ap.max_climb]
             problem.guess.parameter = [np.pi/4, 0]
@@ -471,7 +472,92 @@ class Optimizer:
                 self.initial[f"constr{c}_state"] = np.array([[start.x, end.x], [start.y, end.y], [start.z, end.z], [dir1, dir1]])
                 self.initial[f"constr{c}_params"] = np.array([0, self.ap.V_cruise, 0])
             else:
-                self.initial[f"constr{c}_time"], self.initial[f"constr{c}_state"], self.initial[f"constr{c}_params"] = self.initial_solver(prob, start.state(), end.state())
+                self.initial[f"constr{c}_time"], self.initial[f"constr{c}_state"], self.initial[f"constr{c}_params"] = self.initial_solver(prob, start.state(False), end.state(False), dir1)
+
+        return self.initial
+    
+    def presolve_plot(self):
+        '''
+        Plots the guess trajectory.
+        '''
+        # Checks to see if extract() has been run and runs it if not.
+        if self.initial is None:
+            self.presolve()
+        traj = self.traj
+        ap = self.ap
+        initial = self.initial
+
+        # Helpful reference numbers for cleaner indexing later
+        num_constr = len(traj.constraints)
+
+        # Initialize figure.
+        fig = plt.figure(figsize=(20,16))
+        fig.tight_layout()
+
+        # Plot the trajectory.
+        ax1 = fig.add_subplot(2, 2, 1, projection='3d')
+        # Go phase by phase so that each phase gets its own color.
+        for c in range(num_constr):
+            x_temp, y_temp, z_temp, phi_temp = initial[f"constr{c}_state"]
+            ax1.plot(x_temp, y_temp, z_temp)
+        for i in range(num_constr):
+            ax1.scatter(*traj.constraints[i].state(False), color='red', label='Constraint')
+        ax1.scatter(*traj.start.state(False), color='green', label='Start Constraint')
+        ax1.set_aspect('equal', adjustable='datalim')
+        ax1.set_xlabel("x [m]")
+        ax1.set_ylabel("y [m]")
+        ax1.set_zlabel("z [m]")
+        ax1.set_title("Trajectory")
+        ax1.grid(True)
+
+        # Plot the turn radius.
+        ax2 = fig.add_subplot(2, 2, 2)
+        # Plot the speed.
+        ax3 = fig.add_subplot(2, 2, 3)
+        # Plot the climb rate.
+        ax4 = fig.add_subplot(2, 2, 4)
+
+        t_phase_temp = []
+        t_phase_temp.append(initial[f"constr0_time"][0])
+        for c in range(num_constr):
+            t_temp = initial[f"constr{c}_time"]
+            t_phase_temp.append(t_temp[-1])
+            bank_temp, V_temp, omega_temp = initial[f"constr{c}_params"]
+            if np.abs(bank_temp) < ap.roll_min_rad:
+                r_temp = 0
+            else:
+                r_temp = V_temp**2/(9.80665*np.tan(bank_temp))
+            ax2.plot([t_temp[0], t_temp[-1]], [r_temp, r_temp])
+            ax3.plot([t_temp[0], t_temp[-1]], [V_temp, V_temp])
+            ax4.plot([t_temp[0], t_temp[-1]], [omega_temp, omega_temp])
+
+        ax2.set_xlim(t_phase_temp[0], t_phase_temp[-1])
+        ax2.set_xticks(t_phase_temp)
+        ax3.set_xlim(t_phase_temp[0], t_phase_temp[-1])
+        ax3.set_xticks(t_phase_temp)
+        ax4.set_xlim(t_phase_temp[0], t_phase_temp[-1])
+        ax4.set_xticks(t_phase_temp)
+
+        ax2.set_xlabel("Time [s]")
+        ax2.set_ylabel("Turn Radius [m]")
+        ax2.set_title("Turn Radius Parameters")
+        ax2.grid(True)
+        
+        ax3.set_xlabel("Time [s]")
+        ax3.set_ylabel("Speed [m/s]")
+        ax3.set_title("Speed Parameters")
+        ax3.grid(True)
+
+        ax4.set_xlabel("Time [s]")
+        ax4.set_ylabel("Climb Rate [m/s]")
+        ax4.set_title("Altitude Parameters")
+        ax4.grid(True)
+
+        plt.close(fig)
+
+        # Return the figure.
+        self.fig = fig
+        return self.fig
 
     def setup(self):
         '''
@@ -503,9 +589,41 @@ class Optimizer:
                                 nd = 5*(tot_phase-1),
                                 nq = [1]*tot_phase)
         
+        # Add in guesses from preliminary solutions
+        global_t0 = 0.0
+        for c in range(num_constr):
+            time_leg = np.asarray(self.initial[f"constr{c}_time"]).copy()
+            state_leg = np.asarray(self.initial[f"constr{c}_state"]).copy()
+            state_leg[3] = np.unwrap(state_leg[3])
+            param_leg = np.asarray(self.initial[f"constr{c}_params"]).copy()
+
+            time_leg = time_leg - time_leg[0]
+            time_leg, unique_idx = np.unique(time_leg, return_index=True)
+            state_leg = state_leg[:, unique_idx]
+            t_inter = np.linspace(time_leg[0], time_leg[-1], traj.phases_per_constraint + 1)
+
+            for i in range(traj.phases_per_constraint):
+                t0 = t_inter[i]
+                t1 = t_inter[i+1]
+                t_range_idx = (time_leg > t0 + 1e-12) & (time_leg < t1 - 1e-12)
+                t_range = np.concatenate(([t0], time_leg[t_range_idx], [t1]))
+                t_range = np.unique(t_range)
+                state_sub = np.vstack([np.interp(t_range, time_leg, state_leg[k]) for k in range(4)])
+                t_sub = t_range + global_t0
+                param_sub = param_leg
+
+                phase_idx = i + c*traj.phases_per_constraint
+                problem.guess.phase[phase_idx].time = t_sub
+                problem.guess.phase[phase_idx].state = state_sub
+                problem.guess.parameter[3*phase_idx:3*phase_idx+3] = param_sub
+
+            global_t0 += time_leg[-1]
+
+        t_guess = global_t0
+        
         # Define the objective function.
         def objective(arg):
-            arg.objective = W_t*arg.phase[-1].final_time
+            arg.objective = W_t*arg.phase[-1].final_time/t_guess
             for p in range(tot_phase):
                 arg.objective += arg.phase[p].integral[0]
 
@@ -552,39 +670,6 @@ class Optimizer:
             problem.bounds.parameter.upper[3*p+1] = ap.V_max
             problem.bounds.parameter.lower[3*p+2] = -ap.max_desc
             problem.bounds.parameter.upper[3*p+2] = ap.max_climb
-            problem.guess.phase[p].time = [0, 1]
-
-        # Add in guesses from preliminary solutions
-        global_t0 = 0.0
-        for c in range(num_constr):
-            time_leg = np.asarray(self.initial[f"constr{c}_time"]).copy()
-            state_leg = np.asarray(self.initial[f"constr{c}_state"]).copy()
-            state_leg[3] = np.unwrap(state_leg[3])
-            param_leg = np.asarray(self.initial[f"constr{c}_params"]).copy()
-
-            time_leg = time_leg - time_leg[0]
-            time_leg, unique_idx = np.unique(time_leg, return_index=True)
-            state_leg = state_leg[:, unique_idx]
-            t_inter = np.linspace(time_leg[0], time_leg[-1], traj.phases_per_constraint + 1)
-
-            for i in range(traj.phases_per_constraint):
-                t0 = t_inter[i]
-                t1 = t_inter[i+1]
-                t_range_idx = (time_leg > t0 + 1e-12) & (time_leg < t1 - 1e-12)
-                t_range = np.concatenate(([t0], time_leg[t_range_idx], [t1]))
-                t_range = np.unique(t_range)
-                state_sub = np.vstack([np.interp(t_range, time_leg, state_leg[k]) for k in range(4)])
-                t_sub = t_range + global_t0
-                param_sub = param_leg
-
-                phase_idx = i + c*traj.phases_per_constraint
-                problem.guess.phase[phase_idx].time = t_sub
-                problem.guess.phase[phase_idx].state = state_sub
-                problem.guess.parameter[3*phase_idx:3*phase_idx+3] = param_sub
-
-            global_t0 += time_leg[-1]
-
-
 
         # Make sure that all discrete constraints are enforced.
         problem.bounds.discrete.lower[0:5*(tot_phase-1)] = -1e-8
@@ -746,9 +831,9 @@ class Optimizer:
         for p in range(tot_phase):
             x_temp, y_temp, z_temp, phi_temp = sol.phase[p].state
             ax1.plot(x_temp, y_temp, z_temp)
-        ax1.scatter(*traj.start.state(False), color='green', label='Start Constraint')
         for i in range(num_constr):
             ax1.scatter(*traj.constraints[i].state(False), color='red', label='Constraint')
+        ax1.scatter(*traj.start.state(False), color='green', label='Start Constraint')
         ax1.set_aspect('equal', adjustable='datalim')
         ax1.set_xlabel("x [m]")
         ax1.set_ylabel("y [m]")

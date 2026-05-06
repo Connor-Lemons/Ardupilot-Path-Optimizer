@@ -27,3 +27,5 @@
 - Add iterate with more phases option
 
 - Add type hints
+
+- Generating bearings during initial guess is probably broken
