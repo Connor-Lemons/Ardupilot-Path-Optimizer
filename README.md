@@ -1,3 +1,3 @@
 # Ardupilot Path Planner
 
-Welcome to the Ardupilot Path Planner!
+Welcome to the Ardupilot Path Planner! This is a tool designed to add trajectory control and path planning to Ardupilot via AP's built-in navigation controller using supported Mavlink commands. The example.ipynb notebook is a good place to start to see the basic functionality of the tool, and the full_guide.ipynb notebook is a full tutorial on how the entire tool works. This notebook covers every Class, method, and reasonable syntax error, and also includes the array of test cases used to verify the functionality of this tool. The other notebooks are smaller, undocumented examples which may be interesting to view, but are not intended to be used as a resource to learn how the tool works. The setup_and_solve.py file contains the tool in its entirety, and careful care has been taken to ensure that every process is thoroughly explained with in-line comments or headers. Enjoy!
