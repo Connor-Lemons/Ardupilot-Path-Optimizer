@@ -401,7 +401,7 @@ class Optimizer:
         problem.functions.objective = objective
 
         problem.bounds.phase[0].final_time.lower = min(dist/self.ap.V_cruise, 2*np.pi*self.ap.max_turn/self.ap.V_cruise + z_dist/self.ap.V_cruise)
-        problem.bounds.phase[0].final_time.upper = 2*np.pi*self.ap.max_turn/self.ap.V_cruise + z_dist/self.ap.V_cruise
+        problem.bounds.phase[0].final_time.upper = 2*np.pi*self.ap.max_turn/self.ap.V_cruise + z_dist/max(self.ap.max_desc, self.ap.max_climb)
         problem.bounds.phase[0].initial_state.lower = problem.bounds.phase[0].initial_state.upper = np.concatenate((st, [dir]))
 
         problem.guess.phase[0].state = [
@@ -461,7 +461,7 @@ class Optimizer:
             start = constr_list[c]
             end = constr_list[c+1]
 
-            if start.directional == True:
+            if isinstance(start, StartConstraint):
                 dir1 = start.phi
             else:
                 dir1 = np.atan2((start.y - constr_list[c-1].y), (start.x - constr_list[c-1].x))
@@ -563,7 +563,7 @@ class Optimizer:
         '''
         Creates the YAPSS problem to solve. Can be precomputed to improve speed of self.solve().
         '''
-        # Checks to see if () has been run and runs it if not.
+        # Checks to see if presolve() has been run and runs it if not.
         if self.initial is None:
             self.presolve()
 
@@ -663,7 +663,6 @@ class Optimizer:
         # Preliminarily bound the controls for each phase based on Ardupilot limits. ExtendedConstraints can override these later.
         for p in range(tot_phase):
             problem.bounds.phase[p].initial_time.lower = 0
-            problem.bounds.phase[p].final_time.lower = 0
             problem.bounds.parameter.lower[3*p] = -ap.roll_limit_rad
             problem.bounds.parameter.upper[3*p] = ap.roll_limit_rad
             problem.bounds.parameter.lower[3*p+1] = ap.V_min

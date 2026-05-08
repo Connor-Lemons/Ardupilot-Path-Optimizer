@@ -6,13 +6,7 @@
 
 - Add ability for extended constraints to also constrain following phase
 
-- Add ability for extended constraints to be able to control time duration of phase
-
 - Add solution checker (hamiltonian and potentially runtime)
-
-- Check radius constraint with tolerance for extended constraint, might be weird because of reciprocal.
-
-- Issue with constraints potentially not being met in order, check this
 
 - Have Optimizer automatically run __post_init__ when traj is edited
 
@@ -20,12 +14,8 @@
 
 - Implement better guesses
 
-- Negative radius currently gives CW turns
-
 - Add partial presolve for adding just a few constraints
 
 - Add iterate with more phases option
 
 - Add type hints
-
-- Generating bearings during initial guess is probably broken
